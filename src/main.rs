@@ -2,9 +2,11 @@
 use aes::cipher::BlockEncryptMut;
 use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
 use clap::Parser;
+#[cfg(unix)]
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::process;
@@ -500,12 +502,14 @@ fn process_frames(rx: &mut Vec<u8>, stream: &mut TcpStream, config: &Args, key: 
     }
 }
 
+#[cfg(unix)]
 fn read_pid(pid_file: &PathBuf) -> Option<u32> {
     std::fs::read_to_string(pid_file)
         .ok()
         .and_then(|s| s.trim().parse().ok())
 }
 
+#[cfg(unix)]
 fn daemonize(args: &Args) {
     // Check if already running
     if let Some(pid) = read_pid(&args.pid_file) {
@@ -552,6 +556,12 @@ fn daemonize(args: &Args) {
             eprintln!("Warning: could not open log file {:?}", args.log_file);
         }
     }
+}
+
+#[cfg(not(unix))]
+fn daemonize(_args: &Args) {
+    eprintln!("--daemon is only supported on Unix-like platforms");
+    process::exit(1);
 }
 
 fn main() {
