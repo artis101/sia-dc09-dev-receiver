@@ -1,0 +1,2 @@
+# Default target removed — use native arch for local builds.
+# Cross-compile for linux-musl via: ./build-musl.sh

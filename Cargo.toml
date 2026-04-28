@@ -1,0 +1,23 @@
+[package]
+name = "sia-dc09-mock"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Mock SIA DC-09 receiver for integration testing"
+license = "BSD-2-Clause"
+readme = "README.md"
+keywords = ["sia", "dc09", "alarm", "receiver", "mock"]
+categories = ["command-line-utilities", "development-tools::testing"]
+
+[dependencies]
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+libc = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"

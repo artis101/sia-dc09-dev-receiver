@@ -1,0 +1,23 @@
+target/
+
+# OS/editor noise
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local tool/agent state
+.claude/
+
+# Local runtime/config artifacts
+.env
+.env.*
+*.log
+*.pid
+
+# Ad-hoc release artifacts
+dist/
+release/
+*.tar.gz
+*.zip

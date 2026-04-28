@@ -1,0 +1,68 @@
+name: Release Builds
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            archive: linux-x86_64-musl
+          - target: aarch64-unknown-linux-musl
+            archive: linux-aarch64-musl
+          - target: armv7-unknown-linux-musleabihf
+            archive: linux-armv7-musleabihf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cross
+      - run: cross build --release --target ${{ matrix.target }}
+      - run: tar -C target/${{ matrix.target }}/release -czf sia-dc09-mock-${{ matrix.archive }}.tar.gz sia-dc09-mock
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: sia-dc09-mock-${{ matrix.archive }}.tar.gz
+
+  macos:
+    name: macOS ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            archive: macos-x86_64
+          - target: aarch64-apple-darwin
+            archive: macos-aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - run: tar -C target/${{ matrix.target }}/release -czf sia-dc09-mock-${{ matrix.archive }}.tar.gz sia-dc09-mock
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: sia-dc09-mock-${{ matrix.archive }}.tar.gz
+
+  windows:
+    name: Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - shell: pwsh
+        run: Compress-Archive -Path target/release/sia-dc09-mock.exe -DestinationPath sia-dc09-mock-windows-x86_64.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: sia-dc09-mock-windows-x86_64.zip
