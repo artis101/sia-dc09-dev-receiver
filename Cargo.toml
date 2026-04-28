@@ -1,12 +1,12 @@
 [package]
-name = "sia-dc09-mock"
+name = "sia-dc09-dev-receiver"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Mock SIA DC-09 receiver for integration testing"
+description = "Developer receiver for testing SIA DC-09 alarm integrations"
 license = "BSD-2-Clause"
 readme = "README.md"
-keywords = ["sia", "dc09", "alarm", "receiver", "mock"]
+keywords = ["sia", "dc09", "alarm", "receiver", "testing"]
 categories = ["command-line-utilities", "development-tools::testing"]
 
 [dependencies]

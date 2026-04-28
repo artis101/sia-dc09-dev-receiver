@@ -19,11 +19,14 @@ type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 
 const LF: u8 = 0x0A;
 const CR: u8 = 0x0D;
-const PID_FILE: &str = "/var/run/sia-dc09-mock.pid";
-const LOG_FILE: &str = "/var/log/sia-dc09-mock.log";
+const PID_FILE: &str = "/var/run/sia-dc09-dev-receiver.pid";
+const LOG_FILE: &str = "/var/log/sia-dc09-dev-receiver.log";
 
 #[derive(Parser, Clone)]
-#[command(name = "sia-dc09-mock", about = "Mock SIA DC-09 receiver")]
+#[command(
+    name = "sia-dc09-dev-receiver",
+    about = "Developer receiver for SIA DC-09 integrations"
+)]
 struct Args {
     /// Port to listen on
     #[arg(short, long, default_value_t = 1111)]
@@ -576,7 +579,7 @@ fn main() {
     };
 
     println!(
-        "Mock SIA DC-09 receiver listening on {bind_addr} (reply={}, idle={}s)",
+        "SIA DC-09 Dev Receiver listening on {bind_addr} (reply={}, idle={}s)",
         config.reply, config.idle
     );
 

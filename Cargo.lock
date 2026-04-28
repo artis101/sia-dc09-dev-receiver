@@ -231,7 +231,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sia-dc09-mock"
+name = "sia-dc09-dev-receiver"
 version = "0.1.0"
 dependencies = [
  "aes",

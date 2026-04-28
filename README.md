@@ -1,6 +1,6 @@
-# sia-dc09-mock
+# SIA DC-09 Dev Receiver
 
-A small mock receiver for testing SIA DC-09 alarm reporting integrations.
+A small developer receiver for testing SIA DC-09 alarm reporting integrations.
 
 This tool listens for SIA DC-09 TCP frames, validates basic frame structure, logs parsed event details, optionally decrypts AES-CBC payloads, and replies with configurable `ACK`, `NAK`, or `DUH` responses. It is intended for developers building or debugging SIA DC-09 senders, receivers, gateways, or alarm-response integrations.
 

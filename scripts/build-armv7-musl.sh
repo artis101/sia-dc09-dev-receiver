@@ -3,7 +3,7 @@ set -euo pipefail
 
 TARGET="${TARGET:-armv7-unknown-linux-musleabihf}"
 IMAGE="${IMAGE:-messense/rust-musl-cross:armv7-musleabihf}"
-BIN_NAME="sia-dc09-mock"
+BIN_NAME="sia-dc09-dev-receiver"
 OUT_DIR="target/${TARGET}/release"
 
 docker run --rm \

@@ -27,10 +27,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@cross
       - run: cross build --release --target ${{ matrix.target }}
-      - run: tar -C target/${{ matrix.target }}/release -czf sia-dc09-mock-${{ matrix.archive }}.tar.gz sia-dc09-mock
+      - run: tar -C target/${{ matrix.target }}/release -czf sia-dc09-dev-receiver-${{ matrix.archive }}.tar.gz sia-dc09-dev-receiver
       - uses: softprops/action-gh-release@v2
         with:
-          files: sia-dc09-mock-${{ matrix.archive }}.tar.gz
+          files: sia-dc09-dev-receiver-${{ matrix.archive }}.tar.gz
 
   macos:
     name: macOS ${{ matrix.target }}
@@ -49,10 +49,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - run: cargo build --release --target ${{ matrix.target }}
-      - run: tar -C target/${{ matrix.target }}/release -czf sia-dc09-mock-${{ matrix.archive }}.tar.gz sia-dc09-mock
+      - run: tar -C target/${{ matrix.target }}/release -czf sia-dc09-dev-receiver-${{ matrix.archive }}.tar.gz sia-dc09-dev-receiver
       - uses: softprops/action-gh-release@v2
         with:
-          files: sia-dc09-mock-${{ matrix.archive }}.tar.gz
+          files: sia-dc09-dev-receiver-${{ matrix.archive }}.tar.gz
 
   windows:
     name: Windows x86_64
@@ -62,7 +62,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
       - shell: pwsh
-        run: Compress-Archive -Path target/release/sia-dc09-mock.exe -DestinationPath sia-dc09-mock-windows-x86_64.zip
+        run: Compress-Archive -Path target/release/sia-dc09-dev-receiver.exe -DestinationPath sia-dc09-dev-receiver-windows-x86_64.zip
       - uses: softprops/action-gh-release@v2
         with:
-          files: sia-dc09-mock-windows-x86_64.zip
+          files: sia-dc09-dev-receiver-windows-x86_64.zip
