@@ -23,10 +23,10 @@ Run with the defaults:
 cargo run --release
 ```
 
-Listen on a custom port:
+Listen on a custom port, bound to localhost only:
 
 ```sh
-cargo run --release -- --port 1111
+cargo run --release -- --port 1111 --bind 127.0.0.1
 ```
 
 Use a specific reply mode:
@@ -35,17 +35,25 @@ Use a specific reply mode:
 cargo run --release -- --reply NAK
 ```
 
-Use a custom AES key:
+Use a custom AES key and IV:
 
 ```sh
-cargo run --release -- --key DEADBEEFCAFEBABEDEADBEEFCAFEBABE
+cargo run --release -- --key DEADBEEFCAFEBABEDEADBEEFCAFEBABE --iv 00112233445566778899AABBCCDDEEFF
 ```
+
+The receiver decrypts AES-CBC payloads using the configured key and IV. The default IV is 16 zero bytes; many panels instead derive the IV from the account number, so pass the expected value via `--iv` when testing those devices.
 
 Show all options:
 
 ```sh
 cargo run -- --help
 ```
+
+### Robustness
+
+- Frames are validated for length and CRC-16 before being parsed; malformed frames are answered with `DUH` (CRC fields are accepted in upper- or lowercase hex).
+- The per-connection receive buffer is capped at 64 KiB — a sender streaming data without frame delimiters cannot grow memory indefinitely.
+- Concurrent connections are capped (64); further connections are rejected until slots free up.
 
 ## Device Build
 

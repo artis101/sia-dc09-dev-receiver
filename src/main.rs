@@ -11,6 +11,7 @@ use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
@@ -24,6 +25,35 @@ const CR: u8 = 0x0D;
 const PID_FILE: &str = "/var/run/sia-dc09-dev-receiver.pid";
 const LOG_FILE: &str = "/var/log/sia-dc09-dev-receiver.log";
 
+/// Maximum bytes buffered while waiting for a complete LF..CR frame.
+/// Prevents unbounded memory growth from a sender that streams data
+/// without ever emitting the closing CR.
+const MAX_BUFFER_SIZE: usize = 64 * 1024;
+
+/// Maximum number of concurrently handled client connections.
+static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+const MAX_CONNECTIONS: usize = 64;
+
+/// RAII guard that releases a connection slot when dropped.
+struct ConnectionGuard;
+
+impl ConnectionGuard {
+    fn acquire() -> Option<ConnectionGuard> {
+        ACTIVE_CONNECTIONS
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < MAX_CONNECTIONS).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| ConnectionGuard)
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 #[derive(Parser, Clone)]
 #[command(
     name = "sia-dc09-dev-receiver",
@@ -33,6 +63,10 @@ struct Args {
     /// Port to listen on
     #[arg(short, long, default_value_t = 1111)]
     port: u16,
+
+    /// Address to bind the listener to
+    #[arg(long, default_value = "0.0.0.0")]
+    bind: String,
 
     /// Reply mode: ACK, NAK, or DUH
     #[arg(short, long, default_value = "ACK")]
@@ -45,6 +79,12 @@ struct Args {
     /// AES encryption key (hex; 16/24/32 bytes for AES-128/192/256)
     #[arg(short, long, default_value = "DEADBEEFCAFEBABEDEADBEEFCAFEBABE")]
     key: String,
+
+    /// AES-CBC initialization vector (hex; exactly 16 bytes).
+    /// Defaults to 16 zero bytes. Many panels derive the IV from the
+    /// account number instead — pass that value here to decrypt them.
+    #[arg(long, default_value = "00000000000000000000000000000000")]
+    iv: String,
 
     /// Run as daemon in background
     #[arg(short, long)]
@@ -86,16 +126,27 @@ fn parse_key(hex_str: &str) -> Vec<u8> {
     }
 }
 
-fn try_decrypt(ct: &[u8], key: &[u8]) -> Option<String> {
-    let iv = [0u8; 16];
+fn parse_iv(hex_str: &str) -> [u8; 16] {
+    let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    let bytes = hex::decode(clean).expect("Invalid hex in --iv");
+    bytes.try_into().unwrap_or_else(|v: Vec<u8>| {
+        eprintln!(
+            "AES IV must be exactly 16 bytes / 32 hex chars (got {} bytes)",
+            v.len()
+        );
+        std::process::exit(1);
+    })
+}
+
+fn try_decrypt(ct: &[u8], key: &[u8], iv: &[u8; 16]) -> Option<String> {
     let pt = match key.len() {
-        16 => Aes128CbcDec::new(key.into(), &iv.into())
+        16 => Aes128CbcDec::new(key.into(), iv.into())
             .decrypt_padded_vec_mut::<Pkcs7>(ct)
             .ok()?,
-        24 => Aes192CbcDec::new(key.into(), &iv.into())
+        24 => Aes192CbcDec::new(key.into(), iv.into())
             .decrypt_padded_vec_mut::<Pkcs7>(ct)
             .ok()?,
-        32 => Aes256CbcDec::new(key.into(), &iv.into())
+        32 => Aes256CbcDec::new(key.into(), iv.into())
             .decrypt_padded_vec_mut::<Pkcs7>(ct)
             .ok()?,
         _ => return None,
@@ -103,12 +154,12 @@ fn try_decrypt(ct: &[u8], key: &[u8]) -> Option<String> {
     String::from_utf8(pt).ok()
 }
 
-fn decrypt_payload(hex_ct: &str, key: &[u8]) -> Option<String> {
+fn decrypt_payload(hex_ct: &str, key: &[u8], iv: &[u8; 16]) -> Option<String> {
     let ct = hex::decode(hex_ct).ok()?;
     if ct.len() % 16 != 0 || ct.is_empty() {
         return None;
     }
-    try_decrypt(&ct, key)
+    try_decrypt(&ct, key, iv)
 }
 
 /// Parsed SIA DC-09 header fields
@@ -290,7 +341,7 @@ fn parse_and_log_payload(remainder: &str) {
     }
 }
 
-fn handle_client(stream: TcpStream, config: Arc<Args>, key: Vec<u8>) {
+fn handle_client(stream: TcpStream, config: Arc<Args>, key: Vec<u8>, iv: [u8; 16]) {
     let peer = stream
         .peer_addr()
         .map(|a| a.to_string())
@@ -311,7 +362,16 @@ fn handle_client(stream: TcpStream, config: Arc<Args>, key: Vec<u8>) {
             Ok(0) => break,
             Ok(n) => {
                 rx.extend_from_slice(&buf[..n]);
-                process_frames(&mut rx, &mut stream, &config, &key);
+                process_frames(&mut rx, &mut stream, &config, &key, &iv);
+                // If a sender streams data without ever emitting the closing
+                // CR, drop the buffered garbage instead of growing forever.
+                if rx.len() > MAX_BUFFER_SIZE {
+                    eprintln!(
+                        "! Receive buffer from {peer} exceeded {} bytes without a complete frame; dropping buffered data",
+                        rx.len()
+                    );
+                    rx.clear();
+                }
             }
             Err(ref e)
                 if e.kind() == std::io::ErrorKind::TimedOut
@@ -329,7 +389,13 @@ fn handle_client(stream: TcpStream, config: Arc<Args>, key: Vec<u8>) {
     println!("- Disconnected {peer}");
 }
 
-fn process_frames(rx: &mut Vec<u8>, stream: &mut TcpStream, config: &Args, key: &[u8]) {
+fn process_frames(
+    rx: &mut Vec<u8>,
+    stream: &mut TcpStream,
+    config: &Args,
+    key: &[u8],
+    iv: &[u8; 16],
+) {
     loop {
         let lf_pos = match rx.iter().position(|&b| b == LF) {
             Some(p) => p,
@@ -380,15 +446,21 @@ fn process_frames(rx: &mut Vec<u8>, stream: &mut TcpStream, config: &Args, key: 
             continue;
         }
 
-        // Verify CRC
+        // Verify CRC (case-insensitive: some senders emit lowercase hex)
         let calc_crc = format!("{:04X}", crc16_ibm(middle.as_bytes()));
-        if calc_crc != crc_str {
+        if !calc_crc.eq_ignore_ascii_case(crc_str) {
             eprintln!("! CRC mismatch: got {crc_str}, expected {calc_crc}");
             let _ = stream.write_all(&build_reply("DUH", "0000", None, None));
             continue;
         }
 
         // Extract ID token: "SIA-DCS" or "*SIA-DCS" or "NULL" etc.
+        if !middle.starts_with('"') {
+            eprintln!("! Frame does not start with an ID token quote");
+            let duh = build_reply("DUH", "0000", None, None);
+            let _ = stream.write_all(&duh);
+            continue;
+        }
         let id_end = match middle[1..].find('"') {
             Some(p) => p + 2,
             None => {
@@ -427,7 +499,7 @@ fn process_frames(rx: &mut Vec<u8>, stream: &mut TcpStream, config: &Args, key: 
                 let after_bracket = &remainder[be + 1..];
                 let prefix = &remainder[..bs];
 
-                match decrypt_payload(hex_ct, key) {
+                match decrypt_payload(hex_ct, key, iv) {
                     Some(plaintext) => {
                         println!("  Decrypted: {plaintext}");
                         // If decrypted text already contains brackets, use it directly
@@ -468,7 +540,7 @@ fn process_frames(rx: &mut Vec<u8>, stream: &mut TcpStream, config: &Args, key: 
                 if hex_ct.is_empty() {
                     eprintln!("  ! empty encrypted payload (remainder: {remainder:?})");
                 } else {
-                    match decrypt_payload(hex_ct, key) {
+                    match decrypt_payload(hex_ct, key, iv) {
                         Some(plaintext) => {
                             println!("  Decrypted: {plaintext}");
                             let synth = if plaintext.contains('[') {
@@ -577,9 +649,10 @@ fn main() {
     }
 
     let key = parse_key(&args.key);
+    let iv = parse_iv(&args.iv);
     let config = Arc::new(args.clone());
 
-    let bind_addr = format!("0.0.0.0:{}", config.port);
+    let bind_addr = format!("{}:{}", config.bind, config.port);
     let listener = match TcpListener::bind(&bind_addr) {
         Ok(l) => l,
         Err(e) => {
@@ -596,9 +669,25 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                // Refuse connections beyond the concurrency cap instead of
+                // spawning unbounded threads.
+                let Some(_guard) = ConnectionGuard::acquire() else {
+                    eprintln!(
+                        "! Connection limit ({MAX_CONNECTIONS}) reached, rejecting {}",
+                        stream
+                            .peer_addr()
+                            .map(|a| a.to_string())
+                            .unwrap_or_else(|_| "unknown".into())
+                    );
+                    drop(stream);
+                    continue;
+                };
                 let cfg = Arc::clone(&config);
                 let k = key.clone();
-                std::thread::spawn(move || handle_client(stream, cfg, k));
+                std::thread::spawn(move || {
+                    handle_client(stream, cfg, k, iv);
+                    drop(_guard);
+                });
             }
             Err(e) => eprintln!("Accept error: {e}"),
         }
@@ -672,7 +761,7 @@ mod tests {
         let hex_ciphertext = hex::encode(ciphertext);
 
         assert_eq!(
-            decrypt_payload(&hex_ciphertext, &key),
+            decrypt_payload(&hex_ciphertext, &key, &iv),
             Some("#1234|Nri0/BA".to_string())
         );
     }
@@ -680,7 +769,137 @@ mod tests {
     #[test]
     fn decrypt_payload_rejects_non_block_sized_ciphertext() {
         let key = hex::decode("DEADBEEFCAFEBABEDEADBEEFCAFEBABE").unwrap();
+        let iv = [0u8; 16];
 
-        assert_eq!(decrypt_payload("001122", &key), None);
+        assert_eq!(decrypt_payload("001122", &key, &iv), None);
+    }
+
+    #[test]
+    fn decrypt_payload_honors_nonzero_iv() {
+        // Many panels derive the IV from the account number rather than
+        // using all-zero IVs; decryption must honor the configured IV.
+        let key = hex::decode("DEADBEEFCAFEBABEDEADBEEFCAFEBABE").unwrap();
+        let iv: [u8; 16] = hex::decode("00112233445566778899AABBCCDDEEFF")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let plaintext = b"#1234|Nri1/BA";
+
+        let wrong_iv = [0u8; 16];
+        let ciphertext = Aes128CbcEnc::new(key.as_slice().into(), &iv.into())
+            .encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+
+        assert_eq!(
+            decrypt_payload(&hex::encode(&ciphertext), &key, &iv),
+            Some(String::from_utf8_lossy(plaintext).to_string())
+        );
+        assert_eq!(
+            decrypt_payload(&hex::encode(&ciphertext), &key, &wrong_iv),
+            None,
+            "decrypting with a different IV must fail"
+        );
+    }
+
+    /// Connect an in-memory TCP socket pair for exercising process_frames.
+    fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    /// Build a complete LF..CR frame with valid CRC and length fields.
+    fn frame_from_middle(middle: &str) -> Vec<u8> {
+        let mut frame = Vec::new();
+        frame.push(LF);
+        frame.extend_from_slice(format!("{:04X}", crc16_ibm(middle.as_bytes())).as_bytes());
+        frame.extend_from_slice(format!("0{:03X}", middle.len()).as_bytes());
+        frame.extend_from_slice(middle.as_bytes());
+        frame.push(CR);
+        frame
+    }
+
+    fn test_config() -> Arc<Args> {
+        Arc::new(Args::parse_from([
+            "sia-dc09-dev-receiver",
+            "--bind",
+            "127.0.0.1",
+        ]))
+    }
+
+    #[test]
+    fn process_frames_parses_frame_and_replies_ack_with_matching_seq() {
+        let (mut client, mut server) = tcp_pair();
+        let config = test_config();
+        let key = vec![0u8; 16];
+        let iv = [0u8; 16];
+
+        // The client acts as the alarm sender; process_frames runs on the
+        // receiver-side half of the connection. handle_client normally
+        // accumulates socket bytes into `rx`, so we seed it with the frame.
+        let mut rx = frame_from_middle("\"SIA-DCS\"0001L4ACCT[#ACCT|Nri0/BA]");
+        process_frames(&mut rx, &mut server, &config, &key, &iv);
+
+        let mut reply = vec![0u8; 128];
+        let n = std::io::Read::read(&mut client, &mut reply).unwrap();
+
+        let ascii = std::str::from_utf8(&reply[1..n - 1]).unwrap();
+        assert_eq!(&ascii[8..], "\"ACK\"0001L4ACCT");
+        assert_eq!(
+            &ascii[..4],
+            format!("{:04X}", crc16_ibm(&ascii.as_bytes()[8..]))
+        );
+    }
+
+    #[test]
+    fn process_frames_accepts_lowercase_crc() {
+        let (mut client, mut server) = tcp_pair();
+        let config = test_config();
+        let key = vec![0u8; 16];
+        let iv = [0u8; 16];
+
+        let middle = "\"SIA-DCS\"0002L4ACCT[#ACCT|Nri0/BA]";
+        let mut frame = Vec::new();
+        frame.push(LF);
+        // lowercase CRC on purpose
+        frame.extend_from_slice(format!("{:04x}", crc16_ibm(middle.as_bytes())).as_bytes());
+        frame.extend_from_slice(format!("0{:03X}", middle.len()).as_bytes());
+        frame.extend_from_slice(middle.as_bytes());
+        frame.push(CR);
+        let mut rx = frame;
+        process_frames(&mut rx, &mut server, &config, &key, &iv);
+
+        let mut reply = vec![0u8; 128];
+        let n = std::io::Read::read(&mut client, &mut reply).unwrap();
+
+        let ascii = std::str::from_utf8(&reply[1..n - 1]).unwrap();
+        assert_eq!(&ascii[8..], "\"ACK\"0002L4ACCT", "lowercase CRC must be accepted");
+    }
+
+    #[test]
+    fn process_frames_replies_duh_for_crc_mismatch() {
+        let (mut client, mut server) = tcp_pair();
+        let config = test_config();
+        let key = vec![0u8; 16];
+        let iv = [0u8; 16];
+
+        let middle = "\"SIA-DCS\"0003L4ACCT[#ACCT|Nri0/BA]";
+        let mut frame = Vec::new();
+        frame.push(LF);
+        frame.extend_from_slice(b"BEEF"); // deliberately wrong CRC
+        frame.extend_from_slice(format!("0{:03X}", middle.len()).as_bytes());
+        frame.extend_from_slice(middle.as_bytes());
+        frame.push(CR);
+        client.write_all(&frame).unwrap();
+
+        let mut rx = frame;
+        process_frames(&mut rx, &mut server, &config, &key, &iv);
+
+        let mut reply = vec![0u8; 128];
+        let n = std::io::Read::read(&mut client, &mut reply).unwrap();
+
+        let ascii = std::str::from_utf8(&reply[1..n - 1]).unwrap();
+        assert_eq!(&ascii[8..], "\"DUH\"0000L0");
     }
 }
